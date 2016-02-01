@@ -1,0 +1,1139 @@
+diff -ur a/bootable/recovery/uncrypt/uncrypt.c b/bootable/recovery/uncrypt/uncrypt.c
+--- a/bootable/recovery/uncrypt/uncrypt.c	2015-12-14 11:00:27.962582196 +0000
++++ b/bootable/recovery/uncrypt/uncrypt.c	2015-12-14 12:10:01.000000000 +0000
+@@ -164,12 +164,7 @@
+     if (f == NULL) {
+         return NULL;
+     }
+-    int fd = open(RECOVERY_COMMAND_FILE_TMP, O_WRONLY | O_CREAT | O_SYNC, S_IRUSR | S_IWUSR);
+-    if (fd < 0) {
+-        ALOGE("failed to open %s\n", RECOVERY_COMMAND_FILE_TMP);
+-        return NULL;
+-    }
+-    FILE* fo = fdopen(fd, "w");
++    FILE* fo = fopen(RECOVERY_COMMAND_FILE_TMP, "w");
+ 
+     while (fgets(temp, sizeof(temp), f)) {
+         printf("read: %s", temp);
+@@ -180,7 +175,6 @@
+         fputs(temp, fo);
+     }
+     fclose(f);
+-    fsync(fd);
+     fclose(fo);
+ 
+     if (fn) {
+@@ -196,12 +190,7 @@
+     struct stat sb;
+     int ret;
+ 
+-    int mapfd = open(map_file, O_WRONLY | O_CREAT | O_SYNC, S_IRUSR | S_IWUSR);
+-    if (mapfd < 0) {
+-        ALOGE("failed to open %s\n", map_file);
+-        return -1;
+-    }
+-    FILE* mapf = fdopen(mapfd, "w");
++    FILE* mapf = fopen(map_file, "w");
+ 
+     ret = stat(path, &sb);
+     if (ret != 0) {
+@@ -243,7 +232,7 @@
+ 
+     int wfd = -1;
+     if (encrypted) {
+-        wfd = open(blk_dev, O_WRONLY | O_SYNC);
++        wfd = open(blk_dev, O_WRONLY);
+         if (wfd < 0) {
+             ALOGE("failed to open fd for writing: %s\n", strerror(errno));
+             return -1;
+@@ -313,11 +302,9 @@
+         fprintf(mapf, "%d %d\n", ranges[i*2], ranges[i*2+1]);
+     }
+ 
+-    fsync(mapfd);
+     fclose(mapf);
+     close(fd);
+     if (encrypted) {
+-        fsync(wfd);
+         close(wfd);
+     }
+ 
+@@ -331,7 +318,7 @@
+         struct fstab_rec* v = &fstab->recs[i];
+         if (!v->mount_point) continue;
+         if (strcmp(v->mount_point, "/misc") == 0) {
+-            int fd = open(v->blk_device, O_WRONLY | O_SYNC);
++            int fd = open(v->blk_device, O_WRONLY);
+             uint8_t zeroes[1088];   // sizeof(bootloader_message) from recovery
+             memset(zeroes, 0, sizeof(zeroes));
+ 
+@@ -346,7 +333,7 @@
+                     written += w;
+                 }
+             }
+-            fsync(fd);
++
+             close(fd);
+         }
+     }
+@@ -423,7 +410,10 @@
+     // On /data we want to convert the file to a block map so that we
+     // can read the package without mounting the partition.  On /cache
+     // and /sdcard we leave the file alone.
+-    if (strncmp(path, "/data/", 6) != 0) {
++    //
++    // HACK: ignore above: block map is only used with encryption device
++    // for compatibility with older recoveries
++    if (!encrypted || strncmp(path, "/data/", 6) != 0) {
+         // path does not start with "/data/"; leave it alone.
+         unlink(RECOVERY_COMMAND_FILE_TMP);
+     } else {
+@@ -437,4 +427,4 @@
+     rename(RECOVERY_COMMAND_FILE_TMP, RECOVERY_COMMAND_FILE);
+     if (do_reboot) reboot_to_recovery();
+     return 0;
+-}
++}
+\ No newline at end of file
+diff -ur a/build/core/tasks/kernel.mk b/build/core/tasks/kernel.mk
+--- a/build/core/tasks/kernel.mk	2015-12-14 11:00:29.486582196 +0000
++++ b/build/core/tasks/kernel.mk	2015-12-14 12:10:01.000000000 +0000
+@@ -186,7 +186,11 @@
+     ccache := $(strip $(wildcard $(ccache)))
+ endif
+ 
+-KERNEL_CROSS_COMPILE := CROSS_COMPILE="$(ccache) $(KERNEL_TOOLCHAIN_PATH)"
++ifneq ($(TARGET_KERNEL_CUSTOM_TOOLCHAIN),)     
++    KERNEL_CROSS_COMPILE := CROSS_COMPILE="$(ccache) $(ANDROID_BUILD_TOP)/prebuilts/gcc/linux-x86/arm/$(TARGET_KERNEL_CUSTOM_TOOLCHAIN)/bin/arm-eabi-"      
++else
++	KERNEL_CROSS_COMPILE := CROSS_COMPILE="$(ccache) $(KERNEL_TOOLCHAIN_PATH)"
++endif
+ ccache =
+ 
+ define mv-modules
+@@ -226,8 +230,8 @@
+ 			$(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) oldconfig; fi
+ 	$(hide) if [ ! -z "$(KERNEL_ADDITIONAL_CONFIG)" ]; then \
+ 			echo "Using additional config '$(KERNEL_ADDITIONAL_CONFIG)'"; \
+-			$(KERNEL_SRC)/scripts/kconfig/merge_config.sh -m -O $(KERNEL_OUT) $(KERNEL_OUT)/.config $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERNEL_ADDITIONAL_CONFIG); \
+-			$(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) KCONFIG_ALLCONFIG=$(KERNEL_OUT)/.config alldefconfig; fi
++			cat $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERNEL_ADDITIONAL_CONFIG) >> $(KERNEL_OUT)/.config; \
++			$(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) oldconfig; fi
+ 
+ TARGET_KERNEL_BINARIES: $(KERNEL_OUT) $(KERNEL_CONFIG) $(KERNEL_HEADERS_INSTALL)
+ 	$(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(TARGET_PREBUILT_INT_KERNEL_TYPE)
+@@ -258,29 +262,19 @@
+ 			$(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) oldconfig; fi
+ 	$(hide) if [ ! -z "$(KERNEL_ADDITIONAL_CONFIG)" ]; then \
+ 			echo "Using additional config '$(KERNEL_ADDITIONAL_CONFIG)'"; \
+-			$(KERNEL_SRC)/scripts/kconfig/merge_config.sh -m -O $(KERNEL_OUT) $(KERNEL_OUT)/.config $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERNEL_ADDITIONAL_CONFIG); \
+-			$(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) KCONFIG_ALLCONFIG=$(KERNEL_OUT)/.config alldefconfig; fi
++			cat $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERNEL_ADDITIONAL_CONFIG) >> $(KERNEL_OUT)/.config; \
++			$(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) oldconfig; fi
+ 
+ kerneltags: $(KERNEL_OUT) $(KERNEL_CONFIG)
+ 	$(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) tags
+ 
+-kernelconfig:  KERNELCONFIG_MODE := menuconfig
+-kernelxconfig: KERNELCONFIG_MODE := xconfig
+-kernelxconfig kernelconfig: $(KERNEL_OUT)
+-	$(MAKE) $(MAKE_FLAGS) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) VARIANT_DEFCONFIG=$(VARIANT_DEFCONFIG) SELINUX_DEFCONFIG=$(SELINUX_DEFCONFIG) $(KERNEL_DEFCONFIG)
+-	$(hide) if [ ! -z "$(KERNEL_CONFIG_OVERRIDE)" ]; then \
+-			echo "Overriding kernel config with '$(KERNEL_CONFIG_OVERRIDE)'"; \
+-			echo $(KERNEL_CONFIG_OVERRIDE) >> $(KERNEL_OUT)/.config; fi
++kernelconfig: $(KERNEL_OUT) $(KERNEL_CONFIG)
+ 	env KCONFIG_NOTIMESTAMP=true \
+-		 $(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) $(KERNELCONFIG_MODE)
++		 $(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) menuconfig
+ 	env KCONFIG_NOTIMESTAMP=true \
+ 		 $(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) savedefconfig
+ 	cp $(KERNEL_OUT)/defconfig $(KERNEL_SRC)/arch/$(KERNEL_ARCH)/configs/$(KERNEL_DEFCONFIG)
+ 
+-alldefconfig: $(KERNEL_OUT)
+-	env KCONFIG_NOTIMESTAMP=true \
+-		 $(MAKE) -C $(KERNEL_SRC) O=$(KERNEL_OUT) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) alldefconfig
+-
+ endif # FULL_KERNEL_BUILD
+ 
+ ## Install it
+diff -ur a/external/icu/icu4c/source/common/ucnv.c b/external/icu/icu4c/source/common/ucnv.c
+--- a/external/icu/icu4c/source/common/ucnv.c	2015-12-14 11:01:04.086582196 +0000
++++ b/external/icu/icu4c/source/common/ucnv.c	2015-12-14 12:10:01.000000000 +0000
+@@ -2914,6 +2914,76 @@
+             return FALSE;
+     }
+ }
++
++U_CAPI void    U_EXPORT2 ucnv_setToUCallBack_48 (UConverter * converter,
++                            UConverterToUCallback newAction,
++                            const void* newContext,
++                            UConverterToUCallback *oldAction,
++                            const void** oldContext,
++                            UErrorCode * err) {
++  ucnv_setToUCallBack(converter, newAction, newContext,
++        oldAction, oldContext, err);
++}
++
++U_CAPI void  U_EXPORT2 ucnv_close_48 (UConverter * converter) {
++  ucnv_close (converter);
++}
++
++U_CAPI void  U_EXPORT2
++ucnv_setFromUCallBack_48 (UConverter * converter,
++                            UConverterFromUCallback newAction,
++                            const void* newContext,
++                            UConverterFromUCallback *oldAction,
++                            const void** oldContext,
++                            UErrorCode * err) {
++
++  ucnv_setFromUCallBack(converter, newAction, newContext, oldAction,
++        oldContext, err);
++}
++
++U_CAPI void U_EXPORT2
++ucnv_convertEx_48 (UConverter *targetCnv, UConverter *sourceCnv,
++               char **target, const char *targetLimit,
++               const char **source, const char *sourceLimit,
++               UChar *pivotStart, UChar **pivotSource,
++               UChar **pivotTarget, const UChar *pivotLimit,
++               UBool reset, UBool flush,
++               UErrorCode *pErrorCode) {
++  ucnv_convertEx(targetCnv, sourceCnv, target, targetLimit, source,
++        sourceLimit, pivotStart, pivotSource,
++        pivotTarget, pivotLimit, reset, flush,
++        pErrorCode);
++}
++
++U_CAPI UConverter* U_EXPORT2
++ucnv_open_48 (const char *name,
++                       UErrorCode * err) {
++  return ucnv_open(name, err);
++}
++
++U_STABLE void U_EXPORT2 UCNV_FROM_U_CALLBACK_STOP_48 (
++                  const void *context,
++                  UConverterFromUnicodeArgs *fromUArgs,
++                  const UChar* codeUnits,
++                  int32_t length,
++                  UChar32 codePoint,
++                  UConverterCallbackReason reason,
++                  UErrorCode * err) {
++  return UCNV_FROM_U_CALLBACK_STOP(context, fromUArgs, codeUnits,
++      length, codePoint, reason, err);
++}
++
++U_STABLE void U_EXPORT2 UCNV_TO_U_CALLBACK_STOP_48 (
++                  const void *context,
++                  UConverterToUnicodeArgs *toUArgs,
++                  const char* codeUnits,
++                  int32_t length,
++                  UConverterCallbackReason reason,
++                  UErrorCode * err) {
++  return UCNV_TO_U_CALLBACK_STOP(context, toUArgs, codeUnits, length,
++      reason, err);
++}
++
+ #endif
+ 
+ /*
+diff -ur a/external/sepolicy/domain.te b/external/sepolicy/domain.te
+--- a/external/sepolicy/domain.te	2015-12-14 11:00:55.918582196 +0000
++++ b/external/sepolicy/domain.te	2015-12-14 12:10:01.000000000 +0000
+@@ -59,10 +59,6 @@
+ 
+   # allow "gdbserver --attach" to work for su.
+   allow domain su:process sigchld;
+-
+-  # Allow writing coredumps to /cores/*
+-  allow domain coredump_file:file create_file_perms;
+-  allow domain coredump_file:dir ra_dir_perms;
+ ')
+ 
+ ###
+@@ -220,7 +216,7 @@
+ # init starts in kernel domain and switches to init domain via setcon in
+ # the init.rc, so the setenforce occurs while still in kernel. After
+ # switching domains, there is never any need to setenforce again by init.
+-neverallow domain kernel:security setenforce;
++# neverallow domain kernel:security setenforce;
+ neverallow { domain -kernel } kernel:security setcheckreqprot;
+ 
+ # No booleans in AOSP policy, so no need to ever set them.
+@@ -299,11 +295,7 @@
+ 
+ # Restrict context mounts to specific types marked with
+ # the contextmount_type attribute.
+-ifelse(shipping_build, `true',
+-  `neverallow domain {fs_type -contextmount_type}:filesystem relabelto;'
+-,
+-  `neverallow domain {fs_type -contextmount_type -sdcard_posix}:filesystem relabelto;'
+-)
++neverallow domain {fs_type -contextmount_type -sdcard_posix}:filesystem relabelto;
+ 
+ # Ensure that context mount types are not writable, to ensure that
+ # the write to /system restriction above is not bypassed via context=
+diff -ur a/frameworks/av/include/media/stagefright/ColorConverter.h b/frameworks/av/include/media/stagefright/ColorConverter.h
+--- a/frameworks/av/include/media/stagefright/ColorConverter.h	2015-12-14 10:56:34.426582196 +0000
++++ b/frameworks/av/include/media/stagefright/ColorConverter.h	2015-12-14 12:10:01.000000000 +0000
+@@ -66,6 +66,9 @@
+ 
+     status_t convertCbYCrY(
+             const BitmapParams &src, const BitmapParams &dst);
++			
++	status_t convertYCbYCr(
++            const BitmapParams &src, const BitmapParams &dst);		
+ 
+     status_t convertYUV420Planar(
+             const BitmapParams &src, const BitmapParams &dst);
+diff -ur a/frameworks/av/media/libstagefright/ACodec.cpp b/frameworks/av/media/libstagefright/ACodec.cpp
+--- a/frameworks/av/media/libstagefright/ACodec.cpp	2015-12-14 10:56:34.170582196 +0000
++++ b/frameworks/av/media/libstagefright/ACodec.cpp	2015-12-14 12:10:01.000000000 +0000
+@@ -604,11 +604,11 @@
+ 
+     status_t err;
+     if (mNativeWindow != NULL && portIndex == kPortIndexOutput) {
+-        if (mStoreMetaDataInOutputBuffers) {
+-            err = allocateOutputMetaDataBuffers();
+-        } else {
++        //if (mStoreMetaDataInOutputBuffers) {
++        //    err = allocateOutputMetaDataBuffers();
++        //} else {
+             err = allocateOutputBuffersFromNativeWindow();
+-        }
++        //}
+     } else {
+         OMX_PARAM_PORTDEFINITIONTYPE def;
+         InitOMXParams(&def);
+@@ -634,9 +634,7 @@
+ 
+             for (OMX_U32 i = 0; i < def.nBufferCountActual; ++i) {
+                 sp<IMemory> mem = mDealer[portIndex]->allocate(def.nBufferSize);
+-                if (mem == NULL || mem->pointer() == NULL) {
+-                    return NO_MEMORY;
+-                }
++                CHECK(mem.get() != NULL);
+ 
+                 BufferInfo info;
+                 info.mStatus = BufferInfo::OWNED_BY_US;
+@@ -736,11 +734,33 @@
+             frameHeight,
+             def.format.video.eColorFormat);
+ #else
++	
++	OMX_COLOR_FORMATTYPE HalColorFormat;
++	status_t omxresuilts;
++	
++	ALOGE("PATCH:ACodec:configureOutputBuffersFromNativeWindow def.format.video.eColorFormat: %i", def.format.video.eColorFormat);
++	switch (def.format.video.eColorFormat) {
++		case OMX_COLOR_FormatYCbYCr:
++			ALOGE("PATCH:ACodec:configureOutputBuffersFromNativeWindow def.format.video.eColorFormat: OMX_COLOR_FormatYCbYCr (%i) -> (%i)", OMX_COLOR_FormatYCbYCr, OMX_COLOR_FormatYUV420Planar);
++			def.format.video.eColorFormat = OMX_COLOR_FormatYUV420Planar;
++			omxresuilts = mOMX->setParameter(mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
++			if (omxresuilts != OK) {
++				ALOGE("PATCH:ACodec:configureOutputBuffersFromNativeWindow setParameter(OMX_IndexParamPortDefinition) ERROR");
++			}
++			ALOGE("PATCH:ACodec:configureOutputBuffersFromNativeWindow def.format.video.eColorFormat: OMX_COLOR_FormatYCbYCr (%i) -> (%i) -> HAL_PIXEL_FORMAT_YV12 (%i)", OMX_COLOR_FormatYCbYCr, OMX_COLOR_FormatYUV420Planar, (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YV12);
++			HalColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YV12;	
++		break;
++		default:
++			ALOGE("PATCH:ACodec:configureOutputBuffersFromNativeWindow def.format.video.eColorFormat: default(%i) -> HAL_PIXEL_FORMAT_YV12 (%i)", def.format.video.eColorFormat, (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YV12);
++			HalColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YV12;	
++		break;
++	}
++
+     err = native_window_set_buffers_geometry(
+             mNativeWindow.get(),
+             def.format.video.nFrameWidth,
+             def.format.video.nFrameHeight,
+-            def.format.video.eColorFormat);
++            HalColorFormat);
+ #endif
+ 
+     if (err != 0) {
+@@ -1007,9 +1027,7 @@
+ 
+         sp<IMemory> mem = mDealer[kPortIndexOutput]->allocate(
+                 sizeof(struct VideoDecoderOutputMetaData));
+-        if (mem == NULL || mem->pointer() == NULL) {
+-            return NO_MEMORY;
+-        }
++        CHECK(mem.get() != NULL);
+         info.mData = new ABuffer(mem->pointer(), mem->size());
+ 
+         // we use useBuffer for metadata regardless of quirks
+@@ -1963,6 +1981,9 @@
+         err = setMinBufferSize(kPortIndexInput, (size_t)maxInputSize);
+     } else if (!strcmp("OMX.Nvidia.aac.decoder", mComponentName.c_str())) {
+         err = setMinBufferSize(kPortIndexInput, 8192);  // XXX
++	}else if (!strncmp(mComponentName.c_str(), "OMX.brcm.video.h264.hw.decoder", 30)) {
++		ALOGE("PATCH:ACodec:configureCodec:[%s] setMinBufferSize", mComponentName.c_str());
++        setMinBufferSize(kPortIndexInput, (1080 * 720 * 3) / 2);	
+     }
+ 
+     mBaseOutputFormat = outputFormat;
+diff -ur a/frameworks/av/media/libstagefright/colorconversion/ColorConverter.cpp b/frameworks/av/media/libstagefright/colorconversion/ColorConverter.cpp
+--- a/frameworks/av/media/libstagefright/colorconversion/ColorConverter.cpp	2015-12-14 10:56:34.150582196 +0000
++++ b/frameworks/av/media/libstagefright/colorconversion/ColorConverter.cpp	2015-12-14 12:10:01.000000000 +0000
+@@ -44,6 +44,7 @@
+     switch (mSrcFormat) {
+         case OMX_COLOR_FormatYUV420Planar:
+         case OMX_COLOR_FormatCbYCrY:
++		case OMX_COLOR_FormatYCbYCr:
+         case OMX_QCOM_COLOR_FormatYVU420SemiPlanar:
+         case OMX_COLOR_FormatYUV420SemiPlanar:
+         case OMX_TI_COLOR_FormatYUV420PackedSemiPlanar:
+@@ -109,6 +110,10 @@
+         case OMX_COLOR_FormatCbYCrY:
+             err = convertCbYCrY(src, dst);
+             break;
++			
++		case OMX_COLOR_FormatYCbYCr:
++            err = convertYCbYCr(src, dst);
++            break;	
+ 
+         case OMX_QCOM_COLOR_FormatYVU420SemiPlanar:
+             err = convertQCOMYUV420SemiPlanar(src, dst);
+@@ -159,6 +164,71 @@
+ 
+             signed u_b = u * 517;
+             signed u_g = -u * 100;
++            signed v_g = -v * 208;
++            signed v_r = v * 409;
++
++            signed tmp1 = y1 * 298;
++            signed b1 = (tmp1 + u_b) / 256;
++            signed g1 = (tmp1 + v_g + u_g) / 256;
++            signed r1 = (tmp1 + v_r) / 256;
++
++            signed tmp2 = y2 * 298;
++            signed b2 = (tmp2 + u_b) / 256;
++            signed g2 = (tmp2 + v_g + u_g) / 256;
++            signed r2 = (tmp2 + v_r) / 256;
++
++            uint32_t rgb1 =
++                ((kAdjustedClip[r1] >> 3) << 11)
++                | ((kAdjustedClip[g1] >> 2) << 5)
++                | (kAdjustedClip[b1] >> 3);
++
++            uint32_t rgb2 =
++                ((kAdjustedClip[r2] >> 3) << 11)
++                | ((kAdjustedClip[g2] >> 2) << 5)
++                | (kAdjustedClip[b2] >> 3);
++
++            if (x + 1 < src.cropWidth()) {
++                *(uint32_t *)(&dst_ptr[x]) = (rgb2 << 16) | rgb1;
++            } else {
++                dst_ptr[x] = rgb1;
++            }
++        }
++
++        src_ptr += src.mWidth * 2;
++        dst_ptr += dst.mWidth;
++    }
++
++    return OK;
++}
++
++status_t ColorConverter::convertYCbYCr(
++        const BitmapParams &src, const BitmapParams &dst) {
++		ALOGE("PATCH:ColorConverter:convertYCbYCr");
++    // XXX Untested
++
++    uint8_t *kAdjustedClip = initClip();
++
++    if (!((src.mCropLeft & 1) == 0
++        && src.cropWidth() == dst.cropWidth()
++        && src.cropHeight() == dst.cropHeight())) {
++        return ERROR_UNSUPPORTED;
++    }
++
++    uint16_t *dst_ptr = (uint16_t *)dst.mBits
++        + dst.mCropTop * dst.mWidth + dst.mCropLeft;
++
++    const uint8_t *src_ptr = (const uint8_t *)src.mBits
++        + (src.mCropTop * dst.mWidth + src.mCropLeft) * 2;
++
++    for (size_t y = 0; y < src.cropHeight(); ++y) {
++        for (size_t x = 0; x < src.cropWidth(); x += 2) {
++			signed y1 = (signed)src_ptr[2 * x ] - 16;
++            signed y2 = (signed)src_ptr[2 * x + 2] - 16;
++            signed u = (signed)src_ptr[2 * x + 1] - 128;  
++            signed v = (signed)src_ptr[2 * x + 3] - 128;
++
++            signed u_b = u * 517;
++            signed u_g = -u * 100;
+             signed v_g = -v * 208;
+             signed v_r = v * 409;
+ 
+diff -ur a/frameworks/av/media/libstagefright/MPEG4Writer.cpp b/frameworks/av/media/libstagefright/MPEG4Writer.cpp
+--- a/frameworks/av/media/libstagefright/MPEG4Writer.cpp	2015-12-14 10:56:34.146582196 +0000
++++ b/frameworks/av/media/libstagefright/MPEG4Writer.cpp	2015-12-14 12:10:01.000000000 +0000
+@@ -964,11 +964,7 @@
+     // MP4 file uses time counting seconds since midnight, Jan. 1, 1904
+     // while time function returns Unix epoch values which starts
+     // at 1970-01-01. Lets add the number of seconds between them
+-    static const uint32_t delta = (66 * 365 + 17) * (24 * 60 * 60);
+-    if (now < 0 || uint32_t(now) > UINT32_MAX - delta) {
+-        return 0;
+-    }
+-    uint32_t mpeg4Time = uint32_t(now) + delta;
++    uint32_t mpeg4Time = now + (66 * 365 + 17) * (24 * 60 * 60);
+     return mpeg4Time;
+ }
+ 
+@@ -2298,8 +2294,8 @@
+ 
+         timestampUs -= previousPausedDurationUs;
+         if (WARN_UNLESS(timestampUs >= 0ll, "for %s track", trackName)) {
+-            copy->release();
+-            return ERROR_MALFORMED;
++            //copy->release();
++            //return ERROR_MALFORMED;
+         }
+ 
+         if (!mIsAudio) {
+@@ -2314,8 +2310,8 @@
+             cttsOffsetTimeUs =
+                     timestampUs - decodingTimeUs;
+             if (WARN_UNLESS(kMaxCttsOffsetTimeUs >= decodingTimeUs - timestampUs, "for %s track", trackName)) {
+-                copy->release();
+-                return ERROR_MALFORMED;
++                //copy->release();
++                //return ERROR_MALFORMED;
+             }
+ 
+             timestampUs = decodingTimeUs;
+@@ -2326,8 +2322,8 @@
+             currCttsOffsetTimeTicks =
+                     (cttsOffsetTimeUs * mTimeScale + 500000LL) / 1000000LL;
+             if (WARN_UNLESS(currCttsOffsetTimeTicks <= 0x0FFFFFFFFLL, "for %s track", trackName)) {
+-                copy->release();
+-                return ERROR_MALFORMED;
++                //copy->release();
++                //return ERROR_MALFORMED;
+             }
+ 
+             if (mStszTableEntries->count() == 0) {
+@@ -2368,8 +2364,8 @@
+         }
+ 
+         if (WARN_UNLESS(timestampUs >= 0ll, "for %s track", trackName)) {
+-            copy->release();
+-            return ERROR_MALFORMED;
++            //copy->release();
++            //return ERROR_MALFORMED;
+         }
+ 
+         ALOGV("%s media time stamp: %" PRId64 " and previous paused duration %" PRId64,
+@@ -2389,12 +2385,12 @@
+         if (currDurationTicks < 0ll) {
+             ALOGE("timestampUs %" PRId64 " < lastTimestampUs %" PRId64 " for %s track",
+                 timestampUs, lastTimestampUs, trackName);
+-            copy->release();
+-            err = UNKNOWN_ERROR;
+-            mSource->notifyError(err);
+-            copy->release();
+-            copy = NULL;
+-            return err;
++            //copy->release();
++			//err = UNKNOWN_ERROR;
++			//mSource->notifyError(err);
++            //copy->release();
++            //copy = NULL;
++            //return err;
+         }
+ 
+         // if the duration is different for this sample, see if it is close enough to the previous
+@@ -2492,7 +2488,7 @@
+     }
+ 
+     if (isTrackMalFormed()) {
+-        err = ERROR_MALFORMED;
++        //err = ERROR_MALFORMED;
+     }
+ 
+     mOwner->trackProgressStatus(mTrackId, -1, err);
+diff -ur a/frameworks/av/media/libstagefright/OMXCodec.cpp b/frameworks/av/media/libstagefright/OMXCodec.cpp
+--- a/frameworks/av/media/libstagefright/OMXCodec.cpp	2015-12-14 10:56:33.206582196 +0000
++++ b/frameworks/av/media/libstagefright/OMXCodec.cpp	2015-12-14 12:10:01.000000000 +0000
+@@ -1713,6 +1713,12 @@
+ #endif
+ 
+         int32_t colorFormat;
++		
++		if (!strncmp("OMX.brcm.video.h264.hw.decoder", mComponentName, 30)) {
++			ALOGE("PATCH:OMXCodec:setVideoOutputFormat[%s] colorFormat = %i FOUND BRCM set 19", mComponentName, colorFormat);	
++			format.eColorFormat = OMX_COLOR_FormatYUV420Planar;
++		}
++		
+         if (meta->findInt32(kKeyColorFormat, &colorFormat)
+                 && colorFormat != OMX_COLOR_FormatUnused
+                 && colorFormat != format.eColorFormat) {
+@@ -1725,6 +1731,10 @@
+                 if (format.eColorFormat == colorFormat) {
+                     break;
+                 }
++				if(err == 0x80001005){
++					ALOGE("PATCH:OMXCodec:setVideoOutputFormat[%s] getParameter(OMX_IndexParamVideoPortFormat) colorFormat(%i) != format.eColorFormat (%i) OMX_ErrorNoMore", mComponentName, colorFormat, format.eColorFormat);
++					err = OMX_ErrorNoMore;
++				}
+             }
+             if (format.eColorFormat != colorFormat) {
+                 CODEC_LOGE("Color format %d is not supported", colorFormat);
+@@ -1755,11 +1765,11 @@
+ 
+ #if 1
+     // XXX Need a (much) better heuristic to compute input buffer sizes.
+-#ifdef USE_SAMSUNG_COLORFORMAT
++//#ifdef USE_SAMSUNG_COLORFORMAT
+     const size_t X = 64 * 8 * 1024;
+-#else
+-    const size_t X = 64 * 1024;
+-#endif
++//#else
++//    const size_t X = 64 * 1024;
++//#endif
+     if (def.nBufferSize < X) {
+         def.nBufferSize = X;
+     }
+@@ -2299,11 +2309,37 @@
+             frameHeight,
+             def.format.video.eColorFormat);
+ #else
++	
++	ALOGE("PATCH:OMXCodec:allocateOutputBuffersFromNativeWindow def.format.video.eColorFormat = %i", def.format.video.eColorFormat);
++
++	OMX_COLOR_FORMATTYPE HalColorFormat;
++	status_t errss;
++	
++	switch (def.format.video.eColorFormat) {
++		case OMX_COLOR_FormatYCbYCr:
++			ALOGE("PATCH:OMXCodec:allocateOutputBuffersFromNativeWindow OMX_COLOR_FormatYCbYCr(%i) -> (%i)", OMX_COLOR_FormatYCbYCr, OMX_COLOR_FormatYUV420Planar);
++			def.format.video.eColorFormat = OMX_COLOR_FormatYUV420Planar;
++			errss = mOMX->setParameter(mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
++			if (errss != OK){
++				ALOGE("PATCH:OMXCodec:allocateOutputBuffersFromNativeWindow setParameter failed: %d", errss);
++			}		
++			HalColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YV12;
++		break;
++		case OMX_COLOR_FormatYUV420Planar:
++			ALOGE("PATCH:OMXCodec:allocateOutputBuffersFromNativeWindow OMX_COLOR_FormatYUV420Planar(%i) -> HAL_PIXEL_FORMAT_YV12(%i)", OMX_COLOR_FormatYUV420Planar, (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YV12);
++			HalColorFormat = (OMX_COLOR_FORMATTYPE)HAL_PIXEL_FORMAT_YV12;
++		break;
++		default:
++			ALOGE("PATCH:OMXCodec:allocateOutputBuffersFromNativeWindow default(%i) -> default(%i)", def.format.video.eColorFormat, def.format.video.eColorFormat);
++			HalColorFormat = def.format.video.eColorFormat;
++		break;
++	}
++
+     err = native_window_set_buffers_geometry(
+             mNativeWindow.get(),
+             def.format.video.nFrameWidth,
+             def.format.video.nFrameHeight,
+-            def.format.video.eColorFormat);
++            HalColorFormat);
+ #endif
+ 
+     if (err != 0) {
+@@ -5470,7 +5506,14 @@
+                     caps->mColorFormats.push(flexibleEquivalent);
+                 }
+             }
+-            caps->mColorFormats.push(portFormat.eColorFormat);
++            //caps->mColorFormats.push(portFormat.eColorFormat);
++			if(portFormat.eColorFormat == OMX_COLOR_FormatYCbYCr) {
++				ALOGE("PATCH:OMXCodec:QueryCodec:getParameter(IndexParamVideoPortFormat) portFormat.eColorFormat %i SET %i", portFormat.eColorFormat, OMX_COLOR_FormatYUV420Planar);
++				caps->mColorFormats.push(OMX_COLOR_FormatYUV420Planar);
++			}else{
++				ALOGE("PATCH:OMXCodec:QueryCodec:getParameter(IndexParamVideoPortFormat) DEFAULT portFormat.eColorFormat %i", portFormat.eColorFormat);
++				caps->mColorFormats.push(portFormat.eColorFormat);
++			}
+         }
+     }
+ 
+diff -ur a/frameworks/base/services/core/java/com/android/server/power/PowerManagerService.java b/frameworks/base/services/core/java/com/android/server/power/PowerManagerService.java
+--- a/frameworks/base/services/core/java/com/android/server/power/PowerManagerService.java	2015-12-14 10:56:56.306582196 +0000
++++ b/frameworks/base/services/core/java/com/android/server/power/PowerManagerService.java	2015-12-14 12:10:01.000000000 +0000
+@@ -237,6 +237,7 @@
+     // Timestamp of the last call to user activity.
+     private long mLastUserActivityTime;
+     private long mLastUserActivityTimeNoChangeLights;
++	private long mLastButtonActivityTime;
+ 
+     // Timestamp of last interactive power hint.
+     private long mLastInteractivePowerHintTime;
+@@ -1155,6 +1156,10 @@
+                     return true;
+                 }
+             } else {
++				if (eventTime > mLastButtonActivityTime && (event & PowerManager.USER_ACTIVITY_EVENT_BUTTON) != 0) {
++                    mLastButtonActivityTime = eventTime;
++                    mDirty |= DIRTY_USER_ACTIVITY;
++                }
+                 if (eventTime > mLastUserActivityTime) {
+                     mLastUserActivityTime = eventTime;
+                     mDirty |= DIRTY_USER_ACTIVITY;
+@@ -1667,7 +1672,7 @@
+                             mKeyboardLight.setBrightness(mKeyboardVisible ?
+                                     keyboardBrightness : 0);
+                             if (mButtonTimeout != 0
+-                                    && now > mLastUserActivityTime + mButtonTimeout) {
++                                    && now > mLastButtonActivityTime + mButtonTimeout) {
+                                 mButtonsLight.setBrightness(0);
+                             } else {
+                                 if (!mProximityPositive) {
+@@ -3773,4 +3778,4 @@
+             }
+         }
+     }
+-}
++}
+\ No newline at end of file
+diff -ur a/frameworks/base/telephony/java/android/telephony/TelephonyManager.java b/frameworks/base/telephony/java/android/telephony/TelephonyManager.java
+--- a/frameworks/base/telephony/java/android/telephony/TelephonyManager.java	2015-12-14 10:57:03.902582196 +0000
++++ b/frameworks/base/telephony/java/android/telephony/TelephonyManager.java	2015-12-14 12:10:01.000000000 +0000
+@@ -3017,49 +3017,22 @@
+      * @hide
+      */
+     public static void setTelephonyProperty(int phoneId, String property, String value) {
+-        String propVal = "";
+-        String p[] = null;
+-        String prop = SystemProperties.get(property);
+-
+-        if (value == null) {
+-            value = "";
+-        }
+-
+-        if (prop != null) {
+-            p = prop.split(",");
+-        }
++        
+ 
+         if (!SubscriptionManager.isValidPhoneId(phoneId)) {
+             Rlog.d(TAG, "setTelephonyProperty: invalid phoneId=" + phoneId +
+-                    " property=" + property + " value: " + value + " prop=" + prop);
++                    " property=" + property + " value: " + value);
+             return;
+         }
+ 
+-        for (int i = 0; i < phoneId; i++) {
+-            String str = "";
+-            if ((p != null) && (i < p.length)) {
+-                str = p[i];
+-            }
+-            propVal = propVal + str + ",";
+-        }
+-
+-        propVal = propVal + value;
+-        if (p != null) {
+-            for (int i = phoneId + 1; i < p.length; i++) {
+-                propVal = propVal + "," + p[i];
+-            }
+-        }
+-
+-        if (property.length() > SystemProperties.PROP_NAME_MAX
+-                || propVal.length() > SystemProperties.PROP_VALUE_MAX) {
+-            Rlog.d(TAG, "setTelephonyProperty: property to long phoneId=" + phoneId +
+-                    " property=" + property + " value: " + value + " propVal=" + propVal);
+-            return;
++       
++        if (phoneId > 0) {
++            property += "_" + phoneId;
+         }
+ 
+         Rlog.d(TAG, "setTelephonyProperty: success phoneId=" + phoneId +
+-                " property=" + property + " value: " + value + " propVal=" + propVal);
+-        SystemProperties.set(property, propVal);
++                " property=" + property + " value: " + value);
++        SystemProperties.set(property, value);
+     }
+ 
+     /**
+@@ -3156,17 +3129,22 @@
+      * @hide
+      */
+     public static String getTelephonyProperty(int phoneId, String property, String defaultVal) {
+-        String propVal = null;
+-        String prop = SystemProperties.get(property);
+-        if ((prop != null) && (prop.length() > 0)) {
+-            String values[] = prop.split(",");
+-            if ((phoneId >= 0) && (phoneId < values.length) && (values[phoneId] != null)) {
+-                propVal = values[phoneId];
+-            }
++        if (!SubscriptionManager.isValidPhoneId(phoneId)) {
++            Rlog.d(TAG, "getTelephonyProperty: invalid phoneId=" + phoneId +
++                    " property=" + property);
++            return defaultVal;
++        }
++
++        if (phoneId > 0) {
++            property += "_" + phoneId;
+         }
++		
++		String propVal = SystemProperties.get(property);
++		
+         Rlog.d(TAG, "getTelephonyProperty: return propVal='" + propVal + "' phoneId=" + phoneId
+-                + " property='" + property + "' defaultVal='" + defaultVal + "' prop=" + prop);
+-        return propVal == null ? defaultVal : propVal;
++                + " property='" + property + "' defaultVal='" + defaultVal);
++
++        return propVal.isEmpty() ? defaultVal : propVal;
+     }
+ 
+     /**
+@@ -3845,8 +3823,6 @@
+             getITelephony().setDataEnabled(subId, enable);
+         } catch (RemoteException e) {
+             Log.e(TAG, "Error calling setDataEnabled", e);
+-        } catch (NullPointerException npe) {
+-            Log.e(TAG, "Error calling setDataEnabled", npe);
+         }
+     }
+ 
+@@ -4307,4 +4283,4 @@
+                     ServiceState.rilRadioTechnologyToString(type));
+         }
+     }
+-}
++}
+\ No newline at end of file
+diff -ur a/frameworks/native/libs/gui/BufferQueueProducer.cpp b/frameworks/native/libs/gui/BufferQueueProducer.cpp
+--- a/frameworks/native/libs/gui/BufferQueueProducer.cpp	2015-12-14 10:56:32.406582196 +0000
++++ b/frameworks/native/libs/gui/BufferQueueProducer.cpp	2015-12-14 12:10:01.000000000 +0000
+@@ -204,7 +204,12 @@
+             const int newUndequeuedCount =
+                 maxBufferCount - (dequeuedCount + 1);
+             const int minUndequeuedCount =
++#ifdef HAWAII_HWC
++                // HACK: for some reason, we need to reduce min undequeue for screen recording
++                mCore->getMinUndequeuedBufferCountLocked(false);
++#else			
+                 mCore->getMinUndequeuedBufferCountLocked(async);
++#endif			
+             if (newUndequeuedCount < minUndequeuedCount) {
+                 BQ_LOGE("%s: min undequeued buffer count (%d) exceeded "
+                         "(dequeued=%d undequeued=%d)",
+@@ -1032,4 +1037,4 @@
+     disconnect(api);
+ }
+ 
+-} // namespace android
++} // namespace android
+\ No newline at end of file
+diff -ur a/frameworks/native/libs/gui/SensorEventQueue.cpp b/frameworks/native/libs/gui/SensorEventQueue.cpp
+--- a/frameworks/native/libs/gui/SensorEventQueue.cpp	2015-12-14 10:56:32.434582196 +0000
++++ b/frameworks/native/libs/gui/SensorEventQueue.cpp	2015-12-14 12:10:01.000000000 +0000
+@@ -130,8 +130,12 @@
+ 
+ status_t SensorEventQueue::enableSensor(int32_t handle, int32_t samplingPeriodUs,
+                                         int maxBatchReportLatencyUs, int reservedFlags) const {
+-    return mSensorEventConnection->enableDisable(handle, true, us2ns(samplingPeriodUs),
+-                                                 us2ns(maxBatchReportLatencyUs), reservedFlags);
++    status_t err = mSensorEventConnection->enableDisable(handle, true, us2ns(samplingPeriodUs),
++                                                 us2ns(maxBatchReportLatencyUs), reservedFlags);											 
++	if (err == NO_ERROR) {
++        mSensorEventConnection->setEventRate(handle, us2ns(samplingPeriodUs));
++    }
++    return err;											 
+ }
+ 
+ status_t SensorEventQueue::flush() const {
+@@ -167,4 +171,3 @@
+ 
+ // ----------------------------------------------------------------------------
+ }; // namespace android
+-
+diff -ur a/frameworks/native/libs/gui/SurfaceComposerClient.cpp b/frameworks/native/libs/gui/SurfaceComposerClient.cpp
+--- a/frameworks/native/libs/gui/SurfaceComposerClient.cpp	2015-12-14 10:56:32.398582196 +0000
++++ b/frameworks/native/libs/gui/SurfaceComposerClient.cpp	2015-12-14 12:10:01.000000000 +0000
+@@ -838,7 +838,7 @@
+         uint32_t minLayerZ, uint32_t maxLayerZ, bool useIdentityTransform) {
+     sp<ISurfaceComposer> s(ComposerService::getComposerService());
+     if (s == NULL) return NO_INIT;
+-#ifdef USE_MHEAP_SCREENSHOT
++#if defined(USE_MHEAP_SCREENSHOT) && !defined(HAWAII_HWC)
+     int format = 0;
+     producer->query(NATIVE_WINDOW_FORMAT,&format);
+     if (format == PIXEL_FORMAT_RGBA_8888) {
+@@ -970,4 +970,4 @@
+ }
+ 
+ // ----------------------------------------------------------------------------
+-}; // namespace android
++}; // namespace android
+\ No newline at end of file
+diff -ur a/frameworks/native/services/surfaceflinger/SurfaceFlinger.cpp b/frameworks/native/services/surfaceflinger/SurfaceFlinger.cpp
+--- a/frameworks/native/services/surfaceflinger/SurfaceFlinger.cpp	2015-12-14 10:56:32.594582196 +0000
++++ b/frameworks/native/services/surfaceflinger/SurfaceFlinger.cpp	2015-12-14 12:10:01.000000000 +0000
+@@ -31,7 +31,6 @@
+ #endif
+ 
+ #include <cutils/log.h>
+-#include <cutils/iosched_policy.h>
+ #include <cutils/properties.h>
+ 
+ #include <binder/IPCThreadState.h>
+@@ -504,7 +503,6 @@
+ 
+     mEventControlThread = new EventControlThread(this);
+     mEventControlThread->run("EventControl", PRIORITY_URGENT_DISPLAY);
+-    android_set_rt_ioprio(mEventControlThread->getTid(), 1);
+ 
+     // set a fake vsync period if there is no HWComposer
+     if (mHwc->initCheck() != NO_ERROR) {
+@@ -3747,6 +3745,11 @@
+         bool useReadPixels)
+ {
+     ATRACE_CALL();
++	
++// Rotation artifact problems when useReadPixels is false
++#ifdef HAWAII_HWC
++    useReadPixels = true;
++#endif
+ 
+     // get screen geometry
+     const uint32_t hw_w = hw->getWidth();
+@@ -4080,4 +4083,4 @@
+ #if defined(__gl2_h_)
+ #error "don't include gl2/gl2.h in this file"
+ #endif
+-#endif
++#endif
+\ No newline at end of file
+diff -ur a/frameworks/opt/telephony/src/java/com/android/internal/telephony/PhoneBase.java b/frameworks/opt/telephony/src/java/com/android/internal/telephony/PhoneBase.java
+--- a/frameworks/opt/telephony/src/java/com/android/internal/telephony/PhoneBase.java	2015-12-14 10:57:19.034582196 +0000
++++ b/frameworks/opt/telephony/src/java/com/android/internal/telephony/PhoneBase.java	2015-12-14 12:10:01.000000000 +0000
+@@ -226,6 +226,7 @@
+     boolean mDnsCheckDisabled;
+     public DcTrackerBase mDcTracker;
+     boolean mDoesRilSendMultipleCallRing;
++	boolean mDoesRilSendCallRing;
+     int mCallRingContinueToken;
+     int mCallRingDelay;
+     public boolean mIsTheCurrentActivePhone = true;
+@@ -447,6 +448,11 @@
+                 TelephonyProperties.PROPERTY_RIL_SENDS_MULTIPLE_CALL_RING, true);
+         Rlog.d(LOG_TAG, "mDoesRilSendMultipleCallRing=" + mDoesRilSendMultipleCallRing);
+ 
++        // Some RIL do not even send a single RIL_UNSOL_CALL_RING
++        mDoesRilSendCallRing = SystemProperties.getBoolean(
++                "ro.telephony.call_ring", true);
++        Rlog.d(LOG_TAG, "mDoesRilSendCallRing=" + mDoesRilSendCallRing);
++		
+         mCallRingDelay = SystemProperties.getInt(
+                 TelephonyProperties.PROPERTY_CALL_RING_DELAY, 3000);
+         Rlog.d(LOG_TAG, "mCallRingDelay=" + mCallRingDelay);
+@@ -1913,6 +1919,18 @@
+     public void notifyNewRingingConnectionP(Connection cn) {
+         if (!mIsVoiceCapable)
+             return;
++
++        // Fake RIL_UNSOL_CALL_RING if the RIL doesn't send it.
++        // Note that we need the delay to prevent the request from
++        // being sent after CallTracker detects "RINGING" state, but
++        // before the correct contact-specific ringtone is queried.
++        // Otherwise, the incorrect ringtone will be used
++        if (!mDoesRilSendCallRing) {
++            int token = ++mCallRingContinueToken;
++            sendMessageDelayed(
++                    obtainMessage(EVENT_CALL_RING_CONTINUE, token, 0), mCallRingDelay);
++        }
++		
+         AsyncResult ar = new AsyncResult(null, cn, null);
+         mNewRingingConnectionRegistrants.notifyRegistrants(ar);
+     }
+@@ -2345,6 +2363,7 @@
+         pw.println(" mDnsCheckDisabled=" + mDnsCheckDisabled);
+         pw.println(" mDcTracker=" + mDcTracker);
+         pw.println(" mDoesRilSendMultipleCallRing=" + mDoesRilSendMultipleCallRing);
++		pw.println(" mDoesRilSendCallRing=" + mDoesRilSendCallRing);
+         pw.println(" mCallRingContinueToken=" + mCallRingContinueToken);
+         pw.println(" mCallRingDelay=" + mCallRingDelay);
+         pw.println(" mIsTheCurrentActivePhone=" + mIsTheCurrentActivePhone);
+@@ -2416,4 +2435,4 @@
+         throw new CallStateException("addParticipant is not supported in this phone "
+                 + this);
+     }
+-}
++}
+\ No newline at end of file
+diff -ur a/frameworks/opt/telephony/src/java/com/android/internal/telephony/RIL.java b/frameworks/opt/telephony/src/java/com/android/internal/telephony/RIL.java
+--- a/frameworks/opt/telephony/src/java/com/android/internal/telephony/RIL.java	2015-12-14 10:57:18.462582196 +0000
++++ b/frameworks/opt/telephony/src/java/com/android/internal/telephony/RIL.java	2015-12-14 12:10:01.000000000 +0000
+@@ -301,7 +301,7 @@
+     static final int RESPONSE_SOLICITED = 0;
+     static final int RESPONSE_UNSOLICITED = 1;
+ 
+-    static final String[] SOCKET_NAME_RIL = {"rild", "rild2", "rild3"};
++    static final String[] SOCKET_NAME_RIL = {"rild", "rild1", "rild2"};
+ 
+     static final int SOCKET_OPEN_RETRY_MILLIS = 4 * 1000;
+ 
+@@ -5098,4 +5098,4 @@
+ 
+         send(rr);
+     }
+-}
++}
+\ No newline at end of file
+diff -ur a/hardware/broadcom/libbt/src/userial_vendor.c b/hardware/broadcom/libbt/src/userial_vendor.c
+--- a/hardware/broadcom/libbt/src/userial_vendor.c	2015-12-14 10:51:41.522582196 +0000
++++ b/hardware/broadcom/libbt/src/userial_vendor.c	2015-12-14 12:10:01.000000000 +0000
+@@ -195,6 +195,10 @@
+     uint8_t data_bits;
+     uint16_t parity;
+     uint8_t stop_bits;
++	
++#if (BT_WAKE_VIA_USERIAL_IOCTL==TRUE)
++    int ldisc;
++#endif
+ 
+     vnd_userial.fd = -1;
+ 
+@@ -265,6 +269,13 @@
+     tcsetattr(vnd_userial.fd, TCSANOW, &vnd_userial.termios);
+ 
+ #if (BT_WAKE_VIA_USERIAL_IOCTL==TRUE)
++	// TODO: check for breakage on tuna (Galaxy Nexus). It defines this,
++    //       but does not contain the kernel code to support it.
++
++    // Switch to N_BRCM_HCI line disclipline for ioctl to work
++    ldisc = 25; // N_BRCM_HCI
++    ioctl(vnd_userial.fd, TIOCSETD, &ldisc);
++
+     userial_ioctl_init_bt_wake(vnd_userial.fd);
+ #endif
+ 
+@@ -392,4 +403,3 @@
+         vnd_userial_force_2stopbits = FALSE;
+     return 0;
+ }
+-
+diff -ur a/packages/apps/Settings/src/com/android/settings/sim/MultiSimEnablerPreference.java b/packages/apps/Settings/src/com/android/settings/sim/MultiSimEnablerPreference.java
+--- a/packages/apps/Settings/src/com/android/settings/sim/MultiSimEnablerPreference.java	2015-12-14 10:57:38.610582196 +0000
++++ b/packages/apps/Settings/src/com/android/settings/sim/MultiSimEnablerPreference.java	2015-12-14 12:10:01.000000000 +0000
+@@ -229,7 +229,9 @@
+         super.onBindView(view);
+ 
+         mSwitch = (Switch) view.findViewById(com.android.internal.R.id.switchWidget);
+-        mSwitch.setClickable(true);
++         // Disable manual provisioning
++        mSwitch.setClickable(false);
++        mSwitch.setVisibility(View.INVISIBLE);
+ 
+         update();
+     }
+@@ -538,4 +540,4 @@
+             ShapeDrawable swatch;
+         }
+     }
+-}
++}
+\ No newline at end of file
+diff -ur a/packages/services/Telephony/res/values/strings.xml b/packages/services/Telephony/res/values/strings.xml
+--- a/packages/services/Telephony/res/values/strings.xml	2015-12-14 10:57:26.574582196 +0000
++++ b/packages/services/Telephony/res/values/strings.xml	2015-12-14 12:10:01.000000000 +0000
+@@ -609,12 +609,14 @@
+     </string-array>
+ 
+     <string-array name="enabled_networks_except_lte_choices" translatable="false">
+-        <item>@string/network_3G</item>
+-        <item>@string/network_2G</item>
++        <item>@string/preferred_network_mode_wcdma_only_choice</item>
++        <item>@string/preferred_network_mode_gsm_only_choice</item>
++        <item>@string/preferred_network_mode_gsm_wcdma_preferred_choice</item>
+     </string-array>
+     <string-array name="enabled_networks_except_lte_values" translatable="false">
+-        <item>"0"</item>
++        <item>"2"</item>
+         <item>"1"</item>
++        <item>"0"</item>
+     </string-array>
+ 
+     <string-array name="enabled_networks_except_gsm_lte_choices" translatable="false">
+@@ -1262,4 +1264,4 @@
+     <string name="sim_label_emergency_calls">Emergency calls</string>
+     <string name="sim_description_emergency_calls">Emergency calling only</string>
+     <string name="sim_description_default">SIM card, slot: <xliff:g id="slot_id">%s</xliff:g></string>
+-</resources>
++</resources>
+\ No newline at end of file
+diff -ur a/packages/services/Telephony/src/com/android/phone/CallFeaturesSetting.java b/packages/services/Telephony/src/com/android/phone/CallFeaturesSetting.java
+--- a/packages/services/Telephony/src/com/android/phone/CallFeaturesSetting.java	2015-12-14 10:57:26.938582196 +0000
++++ b/packages/services/Telephony/src/com/android/phone/CallFeaturesSetting.java	2015-12-14 12:10:01.000000000 +0000
+@@ -2328,11 +2328,7 @@
+         boolean recordingEnabled = false;
+         try {
+             PackageManager pm = getPackageManager();
+-            ComponentName defaultDialer = PhoneUtils.getDefaultDialerComponent(this);
+-            if (defaultDialer == null) {
+-                return false;
+-            }
+-            String phonePackage = defaultDialer.getPackageName();
++            String phonePackage = "com.android.dialer";
+             Resources res;
+             res = pm.getResourcesForApplication(phonePackage);
+             int booleanID =
+@@ -2351,10 +2347,13 @@
+      * This is useful for implementing "HomeAsUp" capability for second-level Settings.
+      */
+     public static void goUpToTopLevelSetting(Activity activity) {
+-        Intent intent = new Intent(activity, CallFeaturesSetting.class);
+-        intent.setAction(Intent.ACTION_MAIN);
+-        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+-        activity.startActivity(intent);
++        // HACK: See MSimMobileNetworkSubSettings#onOptionsItemSelected
++        if (!PhoneUtils.isMultiSimEnabled()) {
++            Intent intent = new Intent(activity, CallFeaturesSetting.class);
++            intent.setAction(Intent.ACTION_MAIN);
++            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
++            activity.startActivity(intent);
++        }
+         activity.finish();
+     }
+-}
++}
+\ No newline at end of file
+diff -ur a/packages/services/Telephony/src/com/android/phone/MobileNetworkSettings.java b/packages/services/Telephony/src/com/android/phone/MobileNetworkSettings.java
+--- a/packages/services/Telephony/src/com/android/phone/MobileNetworkSettings.java	2015-12-14 10:57:26.922582196 +0000
++++ b/packages/services/Telephony/src/com/android/phone/MobileNetworkSettings.java	2015-12-14 12:10:01.000000000 +0000
+@@ -523,11 +523,11 @@
+ 
+         mEnabledNetworksSummaries = new SparseIntArray();
+         mEnabledNetworksSummaries.append(Phone.NT_MODE_WCDMA_PREF,
+-                R.string.network_wcdma_pref);
++               R.string.preferred_network_mode_gsm_wcdma_preferred_choice);
+         mEnabledNetworksSummaries.append(Phone.NT_MODE_GSM_ONLY,
+-                R.string.network_gsm_only);
++               R.string.preferred_network_mode_gsm_only_choice);
+         mEnabledNetworksSummaries.append(Phone.NT_MODE_WCDMA_ONLY,
+-                R.string.network_wcdma_only);
++               R.string.preferred_network_mode_wcdma_only_choice);
+         mEnabledNetworksSummaries.append(Phone.NT_MODE_GSM_UMTS,
+                R.string.network_gsm_umts);
+         mEnabledNetworksSummaries.append(Phone.NT_MODE_CDMA,
+
+diff -ur a/system/core/libnetutils/ifc_utils.c b/system/core/libnetutils/ifc_utils.c
+--- a/system/core/libnetutils/ifc_utils.c	2015-12-14 11:00:28.406582196 +0000
++++ b/system/core/libnetutils/ifc_utils.c	2015-12-14 12:10:01.000000000 +0000
+@@ -711,3 +711,19 @@
+ 
+     return 0;
+ }
++
++// Required for Broadcom RILD
++int ifc_set_mtu(const char *name, int mtuSz)
++{
++    struct ifreq ifr;
++    int ret;
++    ifc_init_ifr(name, &ifr);
++    ifr.ifr_mtu = mtuSz;
++
++    ret = ioctl(ifc_ctl_sock, SIOCSIFMTU, &ifr);
++    if (ret < 0) {
++        printerr("ifc_set_mtu: SIOCSIFMTU failed: %d\n", ret);
++    }
++
++    return ret;
++}
+
