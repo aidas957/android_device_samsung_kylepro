@@ -132,6 +132,7 @@ BOARD_HAL_STATIC_LIBRARIES                  := libhealthd.hawaii
 
 # RIL
 BOARD_RIL_CLASS                             := ../../../device/samsung/kylepro/ril/
+COMMON_GLOBAL_CFLAGS                        += -DDISABLE_ASHMEM_TRACKING
 
 # Recovery
 # Compile with BUILD_TWRP=true when build TWRP recovery

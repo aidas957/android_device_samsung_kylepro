@@ -6,36 +6,18 @@ on early-init
     chown system system /sys/devices/platform/pwm-backlight.0/backlight/panel/brightness
 
 on init
-# See storage config details at http://source.android.com/tech/storage/
-    mkdir /mnt/shell/emulated 0700 shell shell
-    mkdir /storage 0550 system sdcard_r
-    mkdir /storage/emulated 0555 root root
+    mkdir /tmp
+    mount tmpfs tmpfs /tmp
+    chmod 1775 /tmp
 
-# External storage directories
-    mkdir /mnt/media_rw/sdcard0 0700 media_rw media_rw
-    mkdir /mnt/media_rw/sdcard1 0700 media_rw media_rw
+    symlink /sdcard /mnt/sdcard
+    symlink /sdcard /storage/sdcard0
 
-    mkdir /storage/sdcard0 0700 root root
-    mkdir /storage/sdcard1 0700 root root
-
-    export EXTERNAL_STORAGE /storage/emulated/legacy
-    export SECONDARY_STORAGE /storage/sdcard1
-    export EMULATED_STORAGE_SOURCE /mnt/shell/emulated
-    export EMULATED_STORAGE_TARGET /storage/emulated
-
-# For backwards compatibility
-    symlink /storage/emulated/legacy /sdcard
-    symlink /storage/emulated/legacy /mnt/sdcard
-    symlink /storage/emulated/legacy /storage/sdcard0
-    symlink /mnt/shell/emulated/0 /storage/emulated/legacy
-    symlink /storage/sdcard1 /extSdCard
-    symlink /storage/sdcard1 /mnt/extSdCard
-    symlink /storage/sdcard1 /external_sd
-
-# To store widevine keybox
-    symlink /data/app /factory
     symlink /efs /factory
     symlink /dev/block/mmcblk0p11 /dev/block/param
+
+    # By default, primary storage is physical
+    setprop ro.vold.primary_physical 1
 
 on post-fs-data
 # We will remap this as /storage/sdcard with the sdcard fuse tool
@@ -510,21 +492,6 @@ on post-fs
     restorecon_recursive /efs
     chown radio system /efs
     chmod 0771 /efs
-
-# Create virtual SD card at /mnt/sdcard, based on the /data/media directory
-# daemon will drop to user/group system/media_rw after initializing
-# underlying files in /data/media will be created with user and group media_rw (1023)
-service sdcard /system/bin/sdcard -u 1023 -g 1023 -l /data/media /mnt/shell/emulated
-        class late_start
-
-# fusewrapped sdcard daemon running as media_rw (1023)
-    service fuse_sdcard0 /system/bin/sdcard -u 1023 -g 1023 -d /mnt/media_rw/sdcard0 /storage/sdcard0
-        class late_start
-        disabled
-
-    service fuse_sdcard1 /system/bin/sdcard -u 1023 -g 1023 -d /mnt/media_rw/sdcard1 /storage/sdcard1
-        class late_start
-        disabled
 
 # Create filesystem if necessary
     service setup_fs /system/bin/setup_fs \
